@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Orçamento da casa</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -404,6 +404,21 @@ const state = {
 const CONN_KEY = 'orcamento-conexao-v1';
 const COLS = ['receitas','despesas','cartoes','carteira'];
 
+function lerHashConexao(){
+  const h = location.hash || '';
+  if (h.indexOf('#conn=') !== 0) return null;
+  try {
+    const partes = atob(h.slice(6)).split('|');
+    if (partes[0] && partes[1]) return {url: partes[0], key: partes[1]};
+  } catch(e){}
+  return null;
+}
+function linkAcesso(){
+  const c = Conn.get();
+  if (!c) return '';
+  return location.origin + location.pathname + '#conn=' + btoa(c.url + '|' + c.key);
+}
+
 const Conn = {
   get(){ try { return JSON.parse(localStorage.getItem(CONN_KEY) || 'null'); } catch(e){ return null; } },
   set(v){ try { localStorage.setItem(CONN_KEY, JSON.stringify(v)); } catch(e){} },
@@ -414,6 +429,11 @@ const Store = {
   sb: null, user: null, casa: null, canal: null, canWrite: true,
 
   async init(){
+    const doLink = lerHashConexao();
+    if (doLink){
+      Conn.set(doLink);
+      try { history.replaceState(null, '', location.pathname + location.search); } catch(e){ location.hash = ''; }
+    }
     const c = Conn.get();
     if (!c || !c.url || !c.key){ state.screen = 'setup'; render(); return; }
     if (!window.supabase || !window.supabase.createClient){
@@ -565,10 +585,10 @@ function telaSetup(){
     (state.erro ? '<div class="erro">' + esc(state.erro) + '</div>' : '') +
     '<div class="f"><label for="cUrl">Endereço do projeto</label>' +
     '<input id="cUrl" type="text" placeholder="https://xxxxxxxx.supabase.co" value="' + esc(c.url || '') + '">' +
-    '<span class="hint">Supabase → Project Settings → API → Project URL</span></div>' +
-    '<div class="f"><label for="cKey">Chave pública (anon)</label>' +
-    '<input id="cKey" type="text" placeholder="eyJhbGciOi…" value="' + esc(c.key || '') + '">' +
-    '<span class="hint">A mesma tela, campo anon public. Essa chave é feita para ficar no navegador; quem protege os dados são as regras de acesso do banco.</span></div>' +
+    '<span class="hint">Supabase → botão Connect, no alto do painel, ou Settings → Data API → Project URL</span></div>' +
+    '<div class="f"><label for="cKey">Chave publicável</label>' +
+    '<input id="cKey" type="text" placeholder="sb_publishable_…" value="' + esc(c.key || '') + '">' +
+    '<span class="hint">Supabase → Settings → API Keys → a chave <strong>publishable</strong> (sb_publishable_…) ou, em projetos antigos, a <strong>anon public</strong>. Nunca use a secret nem a service_role.</span></div>' +
     '<div class="acoes"><button class="btn primary" type="button" data-action="conn-save">Conectar</button></div>' +
     '</div></div>';
 }
@@ -1811,6 +1831,12 @@ document.addEventListener('click', async e => {
     }
     case 'conta': dlgConta(); break;
     case 'sair': await Store.sair(); break;
+    case 'copiar-link': {
+      const l = linkAcesso();
+      try { await navigator.clipboard.writeText(l); toast('Link copiado'); }
+      catch(e){ toast('Copie manualmente: ' + l); }
+      break;
+    }
     case 'copiar-convite': {
       const t = (Store.casa && Store.casa.convite) || '';
       try { await navigator.clipboard.writeText(t); toast('Código copiado'); }
@@ -1842,7 +1868,10 @@ function dlgConta(){
     '<div class="kv"><span class="k">Casa</span><span class="v">' + esc(c.nome || '—') + '</span></div>' +
     '<p class="small muted" style="margin:18px 0 8px">Para incluir alguém, passe este código. A pessoa cria a conta dela nesta mesma página e entra com ele — a partir daí vocês lançam nos mesmos dados, ao vivo.</p>' +
     '<div class="codigo">' + esc(c.convite || '—') + '</div>' +
-    '<div style="margin-top:10px"><button class="btn sm" type="button" data-action="copiar-convite">Copiar código</button></div>';
+    '<div style="margin-top:10px; display:flex; gap:7px; flex-wrap:wrap">' +
+    '<button class="btn sm" type="button" data-action="copiar-convite">Copiar código</button>' +
+    '<button class="btn sm" type="button" data-action="copiar-link">Copiar link de acesso</button></div>' +
+    '<p class="small muted" style="margin:10px 0 0">O link de acesso já leva o endereço e a chave publicável embutidos, então a pessoa não precisa digitar nada disso — só criar a conta e colar o código acima.</p>';
   dlgFoot.innerHTML =
     '<button class="btn ghost" type="button" data-action="trocar-conexao">Trocar de nuvem</button>' +
     '<button class="btn" type="button" data-action="dlg-close">Fechar</button>' +
