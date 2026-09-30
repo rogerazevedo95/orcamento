@@ -417,7 +417,8 @@ const state = {
     filtroStatus: 'todos',
     filtroNatureza: 'todas',
     filtroTipo: 'todos',
-    sel: {receitas:[], despesas:[]}
+    sel: {receitas:[], despesas:[]},
+    granEvo: 'mes', janelaEvo: 24
   },
   screen: 'carregando',
   erro: '',
@@ -996,7 +997,8 @@ function viewPainel(){
     fig('Fatura em aberto', money(soma(state.cartoes, c => cartaoResumo(c).emAberto)), state.cartoes.length + (state.cartoes.length === 1 ? ' cartão' : ' cartões')) +
     '</div>';
 
-  h += '<section class="sec">' + secHead('Para onde foi o dinheiro', 'régua 50/30/20') + bandaOrcamento(res) + '</section>';
+  h += '<section class="sec">' + secHead('Para onde foi o dinheiro', 'régua 50/30/20 no período selecionado') + bandaOrcamento(res) + '</section>';
+  h += blocoEvolucao();
 
   h += '<section class="sec">' + secHead('Independência financeira', 'meta: renda passiva cobrindo 100% do custo de vida') +
     '<div class="card">' +
@@ -1734,8 +1736,10 @@ function csvOf(which){
   if (which === 'fluxo'){
     const f = fluxoDiario();
     linhas.push('FLUXO DIÁRIO — saldo inicial ' + num(f.saldoInicial) + ' em ' + f.inicio);
-    linhas.push(['Data','Lançamentos','Entradas','Saídas','Saldo'].map(q).join(';'));
-    f.dias.forEach(d => linhas.push([d.data, d.itens.map(i => i.desc).join(' | '), num(d.entrada), num(d.saida), num(d.saldo)].map(q).join(';')));
+    linhas.push(['Data','Descrição','Origem','Entrada','Saída','Saldo'].map(q).join(';'));
+    f.linhas.forEach(l => linhas.push([l.data, l.desc,
+      l.tipo === 'f' ? 'Fatura' : (l.tipo === 'r' ? 'Receita' : 'Despesa'),
+      num(l.entrada), num(l.saida), num(l.saldo)].map(q).join(';')));
     return '\uFEFF' + linhas.join('\r\n');
   }
   if (which === 'tudo'){
@@ -1814,6 +1818,8 @@ document.addEventListener('click', async e => {
     case 'tab': state.ui.tab = v; state.ui.sel = {receitas:[], despesas:[]}; state.ui.filtroStatus = 'todos'; state.ui.filtroNatureza = 'todas'; state.ui.filtroTipo = 'todos'; render(); window.scrollTo({top:0}); break;
     case 'scope': state.ui.scope = v; render(); break;
     case 'base': state.ui.base = v; render(); break;
+    case 'gran-evo': state.ui.granEvo = v; render(); break;
+    case 'janela-evo': state.ui.janelaEvo = Number(v); render(); break;
     case 'prev-period': state.ui.month = state.ui.scope === 'ano' ? addMonths(state.ui.month, -12) : addMonths(state.ui.month, -1); render(); break;
     case 'next-period': state.ui.month = state.ui.scope === 'ano' ? addMonths(state.ui.month, 12) : addMonths(state.ui.month, 1); render(); break;
     case 'toggle-theme': {
@@ -2143,93 +2149,6 @@ function faturasPorVencimento(inicio, fim){
     });
   });
   return out;
-}
-
-function fluxoDiario(){
-  const cfg = state.config;
-  const inicio = cfg.dataSaldo || todayISO();
-  const horizonte = addMonths(monthOf(inicio), Number(cfg.horizonteFluxo) || 6) + '-31';
-  const itens = [];
-  state.receitas.forEach(r => {
-    const d = dataEfetiva(r);
-    if (d >= inicio && d <= horizonte) itens.push({data:d, desc:r.descricao, entrada: realizadoR(r) || previsto(r), saida:0, tipo:'r', st:r.status});
-  });
-  state.despesas.forEach(x => {
-    if (x.metodo === METODO_CARTAO) return;   // sai no vencimento da fatura, não na data da compra
-    const d = dataEfetiva(x);
-    if (d >= inicio && d <= horizonte) itens.push({data:d, desc:x.descricao, entrada:0, saida: realizadoD(x) || previsto(x), tipo:'d', st:x.status});
-  });
-  faturasPorVencimento(inicio, horizonte).forEach(f => itens.push(f));
-  itens.sort((a,b) => a.data.localeCompare(b.data));
-
-  let saldo = Number(cfg.saldoInicial) || 0;
-  const dias = [];
-  let i = 0;
-  while (i < itens.length){
-    const d = itens[i].data;
-    const grupo = [];
-    while (i < itens.length && itens[i].data === d){ grupo.push(itens[i]); i++; }
-    const ent = soma(grupo, g => g.entrada), sai = soma(grupo, g => g.saida);
-    saldo = saldo + ent - sai;
-    dias.push({data:d, entrada:ent, saida:sai, saldo, itens:grupo});
-  }
-  const negativos = dias.filter(d => d.saldo < 0);
-  const menor = dias.length ? dias.reduce((a,b) => b.saldo < a.saldo ? b : a) : null;
-  const porMes = {};
-  dias.forEach(d => {
-    const m = monthOf(d.data);
-    if (!porMes[m] || d.saldo < porMes[m].saldo) porMes[m] = {saldo:d.saldo, data:d.data};
-  });
-  return {dias, negativos, menor, porMes, inicio, saldoInicial: Number(cfg.saldoInicial) || 0};
-}
-
-function viewFluxo(){
-  const f = fluxoDiario();
-  const cfg = state.config;
-  let h = '<div class="toolbar">' +
-    '<label class="field-inline">Saldo em conta <input type="text" inputmode="decimal" id="fxSaldo" value="' + String(cfg.saldoInicial || 0).replace('.', ',') + '" style="width:120px"></label>' +
-    '<label class="field-inline">na data <input type="date" id="fxData" value="' + esc(cfg.dataSaldo || todayISO()) + '" style="width:150px"></label>' +
-    '<label class="field-inline">horizonte <select id="fxHoriz" style="width:auto">' +
-      [3,6,12,18,24].map(n => '<option value="' + n + '"' + (Number(cfg.horizonteFluxo) === n ? ' selected' : '') + '>' + n + ' meses</option>').join('') +
-    '</select></label>' +
-    '<button class="btn primary" type="button" data-action="fx-salvar">Atualizar</button>' +
-    '<span class="grow"></span><button class="btn" type="button" data-action="export" data-v="fluxo">Exportar CSV</button></div>';
-
-  if (!f.dias.length) return h + empty('Sem movimento no período', 'Informe o saldo atual da conta e a data, e cadastre lançamentos para ver o caixa dia a dia.', 'new-despesa', 'Lançar despesa');
-
-  const alerta = f.negativos.length
-    ? '<div class="banner" style="background:var(--clay-soft)"><strong>' + f.negativos.length + (f.negativos.length === 1 ? ' dia' : ' dias') + ' com saldo negativo.</strong> O primeiro é ' + fmtDate(f.negativos[0].data) + ', em ' + money(f.negativos[0].saldo) + '. Menor saldo do período: ' + money(f.menor.saldo) + ' em ' + fmtDate(f.menor.data) + '.</div>'
-    : '<div class="banner" style="background:var(--viridian-soft)"><strong>Nenhum dia no vermelho no horizonte.</strong> Menor saldo: ' + money(f.menor.saldo) + ' em ' + fmtDate(f.menor.data) + '.</div>';
-  h += alerta;
-
-  h += '<div class="figrow" style="margin-bottom:22px">' +
-    fig('Saldo hoje', money(f.saldoInicial), 'informado por você') +
-    fig('Menor saldo', money(f.menor.saldo), fmtDate(f.menor.data), f.menor.saldo < 0 ? 'neg' : 'pos') +
-    fig('Saldo ao fim', money(f.dias[f.dias.length-1].saldo), fmtDate(f.dias[f.dias.length-1].data)) +
-    fig('Dias no vermelho', String(f.negativos.length), f.negativos.length ? 'exigem atenção' : 'tudo certo', f.negativos.length ? 'neg' : 'pos') +
-    '</div>';
-
-  h += '<section class="sec">' + secHead('Menor saldo de cada mês', 'é o ponto de aperto do mês') +
-    '<div class="tablewrap"><table style="min-width:420px"><thead><tr><th>Mês</th><th>Menor saldo</th><th>No dia</th><th>Situação</th></tr></thead><tbody>' +
-    Object.keys(f.porMes).sort().map(m => {
-      const x = f.porMes[m];
-      return '<tr><td class="desc">' + monthLabel(m) + '</td><td class="num ' + (x.saldo < 0 ? 'neg' : '') + '">' + money(x.saldo) + '</td>' +
-        '<td>' + fmtDate(x.data) + '</td><td>' + (x.saldo < 0 ? '<span class="pill late">no vermelho</span>' : '<span class="pill ok">coberto</span>') + '</td></tr>';
-    }).join('') + '</tbody></table></div></section>';
-
-  h += '<p class="small muted" style="margin:0 0 14px">Compras no cartão não saem do caixa no dia da compra: elas entram como <strong>uma fatura só</strong>, no dia do vencimento de cada cartão. Confira o dia do vencimento e do fechamento na aba Cartões — é o que define em qual fatura cada compra cai.</p>';
-  h += '<section class="sec">' + secHead('Dia a dia') +
-    '<div class="tablewrap"><table><thead><tr><th>Data</th><th>Lançamentos</th><th class="num">Entradas</th><th class="num">Saídas</th><th class="num">Saldo</th></tr></thead><tbody>';
-  f.dias.forEach(d => {
-    const desc = d.itens.slice(0, 4).map(i => esc(i.desc || '—')).join(' · ') + (d.itens.length > 4 ? ' e mais ' + (d.itens.length - 4) : '');
-    h += '<tr' + (d.saldo < 0 ? ' style="background:var(--clay-soft)"' : '') + '>' +
-      '<td>' + fmtDate(d.data) + '</td><td class="sub">' + desc + '</td>' +
-      '<td class="num pos">' + (d.entrada ? money(d.entrada) : '—') + '</td>' +
-      '<td class="num">' + (d.saida ? money(d.saida) : '—') + '</td>' +
-      '<td class="num" style="font-weight:600' + (d.saldo < 0 ? ';color:var(--clay)' : '') + '">' + money(d.saldo) + '</td></tr>';
-  });
-  h += '</tbody></table></div></section>';
-  return h;
 }
 
 /* =========================================================
@@ -3165,6 +3084,250 @@ function viewAcompanha(){
     });
     h += '</div></section>';
   }
+  return h;
+}
+
+/* =========================================================
+   18. Fluxo diário — uma linha por lançamento
+   ========================================================= */
+function fluxoDiario(){
+  const cfg = state.config;
+  const inicio = cfg.dataSaldo || todayISO();
+  const horizonte = addMonths(monthOf(inicio), Number(cfg.horizonteFluxo) || 6) + '-31';
+  const itens = [];
+
+  state.receitas.forEach(r => {
+    const d = dataEfetiva(r);
+    if (d >= inicio && d <= horizonte)
+      itens.push({data:d, desc:r.descricao, detalhe:r.tipo || '', entrada: realizadoR(r) || previsto(r), saida:0, tipo:'r', st:r.status});
+  });
+  state.despesas.forEach(x => {
+    if (x.metodo === METODO_CARTAO) return;            // sai junto na fatura
+    const d = dataEfetiva(x);
+    if (d >= inicio && d <= horizonte)
+      itens.push({data:d, desc:x.descricao, detalhe:x.metodo || '', entrada:0, saida: realizadoD(x) || previsto(x), tipo:'d', st:x.status});
+  });
+  faturasPorVencimento(inicio, horizonte).forEach(f => itens.push(f));
+
+  // data, depois entradas antes de saídas, depois maior valor primeiro
+  itens.sort((a,b) => {
+    if (a.data !== b.data) return a.data.localeCompare(b.data);
+    if ((b.entrada > 0) !== (a.entrada > 0)) return b.entrada - a.entrada;
+    return (b.entrada + b.saida) - (a.entrada + a.saida);
+  });
+
+  let saldo = Number(cfg.saldoInicial) || 0;
+  const linhas = [];
+  const porDia = {};
+  itens.forEach((it, i) => {
+    saldo = saldo + it.entrada - it.saida;
+    const fim = (i === itens.length - 1) || itens[i+1].data !== it.data;
+    const l = Object.assign({}, it, {saldo, fimDoDia: fim});
+    linhas.push(l);
+    if (fim) porDia[it.data] = saldo;
+  });
+
+  const dias = Object.keys(porDia).sort().map(d => ({data:d, saldo:porDia[d]}));
+  const negativos = dias.filter(d => d.saldo < 0);
+  const menor = dias.length ? dias.reduce((a,b) => b.saldo < a.saldo ? b : a) : null;
+  const porMes = {};
+  dias.forEach(d => {
+    const m = monthOf(d.data);
+    if (!porMes[m] || d.saldo < porMes[m].saldo) porMes[m] = {saldo:d.saldo, data:d.data};
+  });
+  return {linhas, dias, negativos, menor, porMes, inicio, saldoInicial: Number(cfg.saldoInicial) || 0};
+}
+
+function viewFluxo(){
+  const f = fluxoDiario();
+  const cfg = state.config;
+  let h = '<div class="toolbar">' +
+    '<label class="field-inline">Saldo em conta <input type="text" inputmode="decimal" id="fxSaldo" value="' + String(cfg.saldoInicial || 0).replace('.', ',') + '" style="width:120px"></label>' +
+    '<label class="field-inline">na data <input type="date" id="fxData" value="' + esc(cfg.dataSaldo || todayISO()) + '" style="width:150px"></label>' +
+    '<label class="field-inline">horizonte <select id="fxHoriz" style="width:auto">' +
+      [3,6,12,18,24].map(n => '<option value="' + n + '"' + (Number(cfg.horizonteFluxo) === n ? ' selected' : '') + '>' + n + ' meses</option>').join('') +
+    '</select></label>' +
+    '<button class="btn primary" type="button" data-action="fx-salvar">Atualizar</button>' +
+    '<span class="grow"></span><button class="btn" type="button" data-action="export" data-v="fluxo">Exportar CSV</button></div>';
+
+  if (!f.linhas.length) return h + empty('Sem movimento no período', 'Informe o saldo atual da conta e a data, e cadastre lançamentos para ver o caixa dia a dia.', 'new-despesa', 'Lançar despesa');
+
+  h += f.negativos.length
+    ? '<div class="banner" style="background:var(--clay-soft)"><strong>' + f.negativos.length + (f.negativos.length === 1 ? ' dia' : ' dias') + ' fechando no vermelho.</strong> O primeiro é ' + fmtDate(f.negativos[0].data) + ', em ' + money(f.negativos[0].saldo) + '. Menor saldo do período: ' + money(f.menor.saldo) + ' em ' + fmtDate(f.menor.data) + '.</div>'
+    : '<div class="banner" style="background:var(--viridian-soft)"><strong>Nenhum dia no vermelho no horizonte.</strong> Menor saldo: ' + money(f.menor.saldo) + ' em ' + fmtDate(f.menor.data) + '.</div>';
+
+  h += '<div class="figrow" style="margin-bottom:22px">' +
+    fig('Saldo hoje', money(f.saldoInicial), 'informado por você') +
+    fig('Menor saldo', money(f.menor.saldo), fmtDate(f.menor.data), f.menor.saldo < 0 ? 'neg' : 'pos') +
+    fig('Saldo ao fim', money(f.dias[f.dias.length-1].saldo), fmtDate(f.dias[f.dias.length-1].data)) +
+    fig('Lançamentos', String(f.linhas.length), f.linhas.filter(l => l.tipo === 'f').length + ' faturas') +
+    '</div>';
+
+  h += '<section class="sec">' + secHead('Menor saldo de cada mês', 'o ponto de aperto do mês') +
+    '<div class="tablewrap"><table style="min-width:420px"><thead><tr><th>Mês</th><th class="num">Menor saldo</th><th>No dia</th><th>Situação</th></tr></thead><tbody>' +
+    Object.keys(f.porMes).sort().map(m => {
+      const x = f.porMes[m];
+      return '<tr><td class="desc">' + monthLabel(m) + '</td><td class="num ' + (x.saldo < 0 ? 'neg' : '') + '">' + money(x.saldo) + '</td>' +
+        '<td>' + fmtDate(x.data) + '</td><td>' + (x.saldo < 0 ? '<span class="pill late">no vermelho</span>' : '<span class="pill ok">coberto</span>') + '</td></tr>';
+    }).join('') + '</tbody></table></div></section>';
+
+  h += '<p class="small muted" style="margin:0 0 14px">Compras no cartão não saem no dia da compra: aparecem como <strong>uma linha de fatura</strong>, no vencimento de cada cartão, para você conferir contra a fatura que chega.</p>';
+
+  h += '<section class="sec">' + secHead('Lançamento a lançamento') +
+    '<div class="tablewrap"><table><thead><tr><th>Data</th><th>Descrição</th><th>Origem</th>' +
+    '<th class="num">Entrada</th><th class="num">Saída</th><th class="num">Saldo</th></tr></thead><tbody>';
+  f.linhas.forEach(l => {
+    const cls = l.tipo === 'f' ? 'pill m' : (l.tipo === 'r' ? 'pill ok' : 'pill q');
+    const rot = l.tipo === 'f' ? 'Fatura' : (l.tipo === 'r' ? 'Receita' : 'Despesa');
+    h += '<tr' + (l.fimDoDia && l.saldo < 0 ? ' style="background:var(--clay-soft)"' : '') + '>' +
+      '<td>' + fmtDate(l.data) + '</td>' +
+      '<td class="desc">' + esc(l.desc || '—') + (l.detalhe ? '<div class="sub">' + esc(l.detalhe) + '</div>' : '') + '</td>' +
+      '<td><span class="' + cls + '">' + rot + '</span></td>' +
+      '<td class="num pos">' + (l.entrada ? money(l.entrada) : '') + '</td>' +
+      '<td class="num">' + (l.saida ? money(l.saida) : '') + '</td>' +
+      '<td class="num" style="font-weight:' + (l.fimDoDia ? '600' : '400') + (l.saldo < 0 ? ';color:var(--clay)' : '') + '">' + money(l.saldo) + '</td></tr>';
+  });
+  h += '</tbody></table></div></section>';
+  return h;
+}
+
+/* =========================================================
+   19. Evolução da régua 50/30/20
+   ========================================================= */
+function serie503020(gran, n){
+  const fim = state.ui.month;
+  const periodos = [];
+  if (gran === 'ano'){
+    const ano = Number(fim.slice(0,4));
+    for (let i = n - 1; i >= 0; i--) periodos.push(String(ano - i + Math.floor(n/3)));
+  } else {
+    const base = addMonths(fim, Math.floor(n/3));
+    for (let i = n - 1; i >= 0; i--) periodos.push(addMonths(base, -i));
+  }
+  const casa = r => gran === 'ano' ? refMes(r).slice(0,4) : refMes(r);
+  return periodos.map(p => {
+    const rec = state.receitas.filter(r => casa(r) === p);
+    const des = state.despesas.filter(d => casa(d) === p);
+    const receita = soma(rec, r => realizadoR(r) || previsto(r));
+    const b = {};
+    NATUREZAS.forEach(nt => {
+      b[nt.id] = soma(des.filter(d => (d.natureza || tipoDespesaInfo(d.tipo).natureza) === nt.id),
+                      d => realizadoD(d) || previsto(d));
+    });
+    const gasto = NATUREZAS.reduce((a, nt) => a + b[nt.id], 0);
+    return {p, receita, b, gasto, sobra: Math.max(0, receita - gasto)};
+  }).filter(x => x.receita > 0 || x.gasto > 0);
+}
+
+function graficoEvolucao(serie, gran){
+  const W = 860, H = 260, padL = 38, padB = 34, padT = 12;
+  const alt = H - padB - padT;
+  const n = serie.length || 1;
+  const bw = (W - padL - 10) / n;
+  const cores = {necessidade:'var(--viridian)', desejo:'var(--ochre)', meta:'var(--azure)', rolagem:'var(--clay)'};
+  let barras = '', rotulos = '';
+  serie.forEach((x, i) => {
+    const base = Math.max(x.receita, x.gasto, 1);
+    let y = padT + alt;
+    const px = padL + i * bw;
+    NATUREZAS.forEach(nt => {
+      const p = x.b[nt.id] / base;
+      if (p <= 0.0005) return;
+      const hh = p * alt;
+      y -= hh;
+      barras += '<rect x="' + (px + 2).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + (bw - 4).toFixed(1) +
+        '" height="' + hh.toFixed(1) + '" fill="' + cores[nt.id] + '"><title>' +
+        esc(x.p) + ' · ' + nt.nome + ': ' + money(x.b[nt.id]) + ' (' + pct(p,1) + ')</title></rect>';
+    });
+    const sob = x.sobra / base;
+    if (sob > 0.0005){
+      const hh = sob * alt; y -= hh;
+      barras += '<rect x="' + (px + 2).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + (bw - 4).toFixed(1) +
+        '" height="' + hh.toFixed(1) + '" fill="var(--line)" opacity="0.7"><title>' + esc(x.p) + ' · sobra: ' + money(x.sobra) + '</title></rect>';
+    }
+    if (n <= 30 && (n <= 14 || i % 2 === 0)){
+      rotulos += '<text x="' + (px + bw/2).toFixed(1) + '" y="' + (H - 14) + '" text-anchor="middle" font-size="9.5" fill="var(--ink-3)">' +
+        esc(gran === 'ano' ? x.p : shortMonth(x.p)) + '</text>';
+    }
+  });
+  let guias = '';
+  [[0.5,'50%'],[0.8,'80%'],[1,'100%']].forEach(([v, rot]) => {
+    const y = padT + alt - v * alt;
+    guias += '<line x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W-10) + '" y2="' + y.toFixed(1) +
+      '" stroke="var(--ink-2)" stroke-width="1" stroke-dasharray="4 4" opacity="0.5"/>' +
+      '<text x="4" y="' + (y+3).toFixed(1) + '" font-size="9.5" fill="var(--ink-3)">' + rot + '</text>';
+  });
+  return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Divisão da renda ao longo do tempo">' +
+    guias + barras + rotulos +
+    '<line x1="' + padL + '" y1="' + (padT+alt) + '" x2="' + (W-10) + '" y2="' + (padT+alt) + '" stroke="var(--line)"/></svg>';
+}
+
+function metasAtingidas(serie){
+  const hoje = monthOf(todayISO());
+  return NATUREZAS.filter(n => n.id !== 'rolagem').map(nt => {
+    const alvo = metaDaNatureza(nt);
+    const dentroEm = x => {
+      if (x.receita <= 0) return null;                 // período sem renda não conta
+      const p = x.b[nt.id] / x.receita;
+      return nt.id === 'meta' ? p >= alvo : p <= alvo;
+    };
+    // o primeiro período a partir do qual a meta se mantém até o fim da série
+    let primeiro = null;
+    for (let i = 0; i < serie.length; i++){
+      let vale = true, validos = 0;
+      for (let k = i; k < serie.length; k++){
+        const d = dentroEm(serie[k]);
+        if (d === null) continue;
+        validos++;
+        if (!d){ vale = false; break; }
+      }
+      if (vale && validos >= 3){ primeiro = serie[i].p; break; }
+    }
+    const ult = serie[serie.length-1];
+    const atual = ult && ult.receita > 0 ? ult.b[nt.id] / ult.receita : 0;
+    return {nt, alvo, primeiro, atual, dentro: nt.id === 'meta' ? atual >= alvo : atual <= alvo};
+  });
+}
+
+function blocoEvolucao(){
+  const gran = state.ui.granEvo || 'mes';
+  const n = gran === 'ano' ? 6 : (Number(state.ui.janelaEvo) || 24);
+  const serie = serie503020(gran, n);
+  if (!serie.length) return '';
+  const metas = metasAtingidas(serie);
+
+  let h = '<section class="sec">' + secHead('Para onde foi o dinheiro ao longo do tempo', 'cada barra é 100% da renda do período') +
+    '<div class="card">' +
+    '<div class="toolbar" style="margin-bottom:12px"><div class="seg">' +
+      '<button type="button" data-action="gran-evo" data-v="mes" aria-pressed="' + (gran==='mes') + '">Por mês</button>' +
+      '<button type="button" data-action="gran-evo" data-v="ano" aria-pressed="' + (gran==='ano') + '">Por ano</button>' +
+    '</div>' +
+    (gran === 'mes' ? '<div class="seg">' + [12,24,36].map(j =>
+      '<button type="button" data-action="janela-evo" data-v="' + j + '" aria-pressed="' + (n===j) + '">' + j + 'm</button>').join('') + '</div>' : '') +
+    '<span class="grow"></span>' +
+    '<span class="small muted">' + NATUREZAS.map(x => '<span class="pill ' + x.cls + '">' + x.nome + '</span>').join(' ') + '</span>' +
+    '</div>' +
+    graficoEvolucao(serie, gran) +
+    '<p class="small muted" style="margin:10px 0 0">As linhas tracejadas marcam 50% e 80% da renda: é onde necessidades e desejos deveriam parar. O que passa de 100% foi gasto acima do que entrou.</p>' +
+    '</div></section>';
+
+  h += '<section class="sec">' + secHead('Quando cada meta é alcançada', 'primeiro período a partir do qual ela não sai mais do alvo') +
+    '<div class="tablewrap"><table style="min-width:620px"><thead><tr><th>Natureza</th><th class="num">Alvo</th>' +
+    '<th class="num">Último período</th><th>Situação</th><th>No alvo sem recair a partir de</th></tr></thead><tbody>';
+  metas.forEach(m => {
+    h += '<tr><td><span class="pill ' + m.nt.cls + '">' + m.nt.nome + '</span></td>' +
+      '<td class="num muted">' + (m.nt.id === 'meta' ? '≥ ' : '≤ ') + pct(m.alvo,0) + '</td>' +
+      '<td class="num" style="font-weight:600">' + pct(m.atual,1) + '</td>' +
+      '<td>' + (m.dentro ? '<span class="pill ok">no alvo</span>' : '<span class="pill late">fora</span>') + '</td>' +
+      '<td>' + (m.primeiro ? (gran === 'ano' ? m.primeiro : monthLabel(m.primeiro)) : '<span class="muted">não se sustenta até o fim da série</span>') + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  const rol = serie[serie.length-1];
+  if (rol && rol.receita > 0 && rol.b.rolagem > 0){
+    h += '<p class="small" style="margin-top:10px">A rolagem de dívida consome ' + pct(rol.b.rolagem/rol.receita,1) +
+      ' da renda no último período. Enquanto ela existir, as três faixas disputam o que sobra, e nenhuma régua fecha.</p>';
+  }
+  h += '</section>';
   return h;
 }
 
