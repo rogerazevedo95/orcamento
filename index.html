@@ -322,7 +322,8 @@ const money = v => BRL.format(Number(v) || 0);
 const money0 = v => BRL0.format(Number(v) || 0);
 const pct = (v, d) => (Number.isFinite(v) ? (v*100).toFixed(d === undefined ? 1 : d).replace('.', ',') + '%' : '—');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const uid = () => 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+let _seq = 0;
+const uid = () => 'x' + Date.now().toString(36) + (_seq++).toString(36) + Math.random().toString(36).slice(2, 10).padEnd(8, '0');
 
 function parseMoney(s){
   if (typeof s === 'number') return s;
@@ -405,6 +406,7 @@ const state = {
   receitas: [], despesas: [], cartoes: [], carteira: [], planos: [],
   config: JSON.parse(JSON.stringify(DEFAULT_CONFIG)),
   importando: null,
+  resultadoImporte: null,
   ready: {receitas:false, despesas:false, cartoes:false, carteira:false, planos:false, config:false},
   ui: {
     tab: 'painel',
@@ -449,7 +451,7 @@ const Conn = {
 };
 
 const Store = {
-  sb: null, user: null, casa: null, canal: null, canWrite: true,
+  sb: null, user: null, casa: null, canal: null, canWrite: true, ultimoErro: '',
 
   async init(){
     const doLink = lerHashConexao();
@@ -548,13 +550,28 @@ const Store = {
       if (i >= 0) arr[i] = full; else arr.push(full);
       return {id, household_id: this.casa.id, colecao: col, dados: body, atualizado_em: new Date().toISOString()};
     });
-    const LOTE = 400;
-    for (let i = 0; i < linhas.length; i += LOTE){
-      const { error } = await this.sb.from('registros').upsert(linhas.slice(i, i + LOTE));
-      if (error){ toast('Falha ao gravar: ' + error.message); return false; }
-      if (progresso) progresso(Math.min(i + LOTE, linhas.length), linhas.length);
+    const vistos = new Set();
+    const limpas = linhas.filter(l => { if (vistos.has(l.id)) return false; vistos.add(l.id); return true; });
+    const LOTE = 200;
+    let gravados = 0;
+    for (let i = 0; i < limpas.length; i += LOTE){
+      const lote = limpas.slice(i, i + LOTE);
+      let erro = null;
+      for (let tent = 0; tent < 3; tent++){
+        const r = await this.sb.from('registros').upsert(lote);
+        erro = r.error;
+        if (!erro) break;
+        await new Promise(res => setTimeout(res, 600 * (tent + 1)));
+      }
+      if (erro){
+        this.ultimoErro = 'Parou no registro ' + (gravados + 1) + ' de ' + limpas.length + ': ' + erro.message;
+        toast('Gravação interrompida. Veja o aviso na tela.');
+        return {ok: false, gravados, total: limpas.length};
+      }
+      gravados += lote.length;
+      if (progresso) progresso(gravados, limpas.length);
     }
-    return true;
+    return {ok: true, gravados, total: limpas.length};
   },
 
   async remove(col, id){
@@ -1971,6 +1988,7 @@ document.addEventListener('click', async e => {
     case 'baixar-dados': baixarPlanilha(true); break;
     case 'importar': document.getElementById('arqImport').click(); break;
     case 'aplicar-importe': btn.disabled = true; await aplicarImporte(); break;
+    case 'fechar-resultado': state.resultadoImporte = null; render(); break;
     case 'alternar-dup': importePendente.pularDup = !importePendente.pularDup; render(); break;
     case 'cancelar-importe': importePendente = null; render(); break;
     case 'conta': dlgConta(); break;
@@ -2738,13 +2756,24 @@ async function aplicarImporte(){
   state.importando = {feito: 0, total};
   render();
   const passo = (f, t, base) => { state.importando = {feito: base + f, total}; render(); };
-  let ok = true;
-  if (recs.length) ok = await Store.saveMany('receitas', recs, (f, t) => passo(f, t, 0));
-  if (ok && desp.length) ok = await Store.saveMany('despesas', desp, (f, t) => passo(f, t, recs.length));
+  const antesR = state.receitas.length, antesD = state.despesas.length;
+  let r1 = {ok:true, gravados:0}, r2 = {ok:true, gravados:0};
+  if (recs.length) r1 = await Store.saveMany('receitas', recs, (f, t) => passo(f, t, 0));
+  if (r1.ok && desp.length) r2 = await Store.saveMany('despesas', desp, (f, t) => passo(f, t, recs.length));
   state.importando = null;
   importePendente = null;
-  if (ok) toast(total + ' lançamentos importados');
-  state.ui.tab = 'painel'; render();
+
+  // confere no banco, não na memória
+  await Store.carregar();
+  const ganhoR = state.receitas.length - antesR, ganhoD = state.despesas.length - antesD;
+  state.resultadoImporte = {
+    esperadoR: recs.length, esperadoD: desp.length,
+    entrouR: ganhoR, entrouD: ganhoD,
+    ok: r1.ok && r2.ok && ganhoR === recs.length && ganhoD === desp.length,
+    erro: Store.ultimoErro || ''
+  };
+  Store.ultimoErro = '';
+  state.ui.tab = 'dados'; render();
 }
 
 function viewDados(){
@@ -2756,6 +2785,16 @@ function viewDados(){
     '<button class="btn primary" type="button" data-action="importar">Importar planilha preenchida</button>' +
     '<input type="file" id="arqImport" accept=".xlsx,.xls" style="display:none">' +
     '</div></div></section>';
+
+  if (state.resultadoImporte){
+    const R = state.resultadoImporte;
+    h += '<div class="banner" style="background:' + (R.ok ? 'var(--viridian-soft)' : 'var(--clay-soft)') + '; margin-bottom:18px">' +
+      '<strong>' + (R.ok ? 'Importação concluída.' : 'Importação incompleta.') + '</strong> ' +
+      'Receitas: ' + R.entrouR + ' de ' + R.esperadoR + '. Despesas: ' + R.entrouD + ' de ' + R.esperadoD + '.' +
+      (R.erro ? ' ' + esc(R.erro) : '') +
+      (R.ok ? '' : ' Importe o mesmo arquivo de novo: as linhas que já entraram serão puladas e só o que faltou será gravado.') +
+      ' <button class="btn sm" type="button" data-action="fechar-resultado" style="margin-left:8px">Fechar</button></div>';
+  }
 
   if (state.importando){
     const im = state.importando;
@@ -2784,9 +2823,14 @@ function viewDados(){
         (p.pularDup ? 'Importar mesmo assim' : 'Voltar a pular') + '</button></div>';
     }
     if (erros.length){
-      h += '<div class="tablewrap" style="margin-bottom:14px"><table style="min-width:460px"><thead><tr><th>Linha</th><th>Descrição</th><th>Problema</th></tr></thead><tbody>' +
-        erros.slice(0,25).map(x => '<tr><td>' + (x.rec.descricao ? '' : '') + (x._linha||'') + '</td><td>' + esc(x.rec.descricao || '—') + '</td><td class="neg">' + esc(x.erros.join('; ')) + '</td></tr>').join('') +
-        '</tbody></table></div>';
+      const agrup = {};
+      erros.forEach(x => x.erros.forEach(e => { agrup[e] = (agrup[e] || 0) + 1; }));
+      h += '<div class="tablewrap" style="margin-bottom:14px"><table style="min-width:460px"><thead><tr><th>Problema</th><th class="num">Linhas</th></tr></thead><tbody>' +
+        Object.keys(agrup).sort((a,b) => agrup[b]-agrup[a]).map(e =>
+          '<tr><td class="neg">' + esc(e) + '</td><td class="num">' + agrup[e] + '</td></tr>').join('') +
+        '</tbody></table></div>' +
+        '<p class="small muted" style="margin:0 0 12px">Exemplos: ' +
+        esc(erros.slice(0,3).map(x => (x.rec.descricao || '?')).join(' · ')) + '</p>';
     }
     h += '<div style="display:flex; gap:8px"><button class="btn primary" type="button" data-action="aplicar-importe">Aplicar importação</button>' +
       '<button class="btn" type="button" data-action="cancelar-importe">Cancelar</button></div></div></section>';
@@ -2798,6 +2842,36 @@ function viewDados(){
     '<button class="btn sm" type="button" data-action="export" data-v="receitas">Receitas em CSV</button>' +
     '<button class="btn sm" type="button" data-action="export" data-v="despesas">Despesas em CSV</button>' +
     '<button class="btn sm" type="button" data-action="export" data-v="fluxo">Fluxo diário em CSV</button>' +
+    '</div></div></section>';
+
+  /* ---- diagnóstico ---- */
+  const porMet = {}, porTipo = {};
+  state.despesas.forEach(d => {
+    const m = d.metodo || '(sem forma)';
+    porMet[m] = (porMet[m] || 0) + 1;
+    const t = d.tipo || '(sem tipo)';
+    porTipo[t] = (porTipo[t] || 0) + 1;
+  });
+  const idsCart = new Set(state.cartoes.map(c => c.id));
+  const orfas = state.despesas.filter(d => d.metodo === METODO_CARTAO && !idsCart.has(d.cartaoId)).length;
+  const semCartao = state.despesas.filter(d => d.metodo === METODO_CARTAO).length;
+
+  h += '<section class="sec">' + secHead('Diagnóstico da base', 'confira se a importação entrou inteira') +
+    '<div class="figrow" style="margin-bottom:14px">' +
+    fig('Receitas', String(state.receitas.length)) +
+    fig('Despesas', String(state.despesas.length)) +
+    fig('Compras no cartão', String(semCartao), semCartao ? '' : 'nenhuma importada', semCartao ? '' : 'neg') +
+    fig('Cartões cadastrados', String(state.cartoes.length)) +
+    fig('Cartão órfão', String(orfas), orfas ? 'apontam para cartão inexistente' : 'nenhuma', orfas ? 'neg' : 'pos') +
+    '</div>' +
+    '<div class="grid">' +
+    '<div class="card"><h3>Por forma de pagamento</h3><div class="meta">quantidade de lançamentos</div>' +
+    Object.keys(porMet).sort((a,b) => porMet[b]-porMet[a]).map(k =>
+      '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + porMet[k] + '</span></div>').join('') +
+    '</div>' +
+    '<div class="card"><h3>Por tipo</h3><div class="meta">quantidade de lançamentos</div>' +
+    Object.keys(porTipo).sort((a,b) => porTipo[b]-porTipo[a]).map(k =>
+      '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + porTipo[k] + '</span></div>').join('') +
     '</div></div></section>';
 
   h += '<section class="sec">' + secHead('Casa e conexão') +
