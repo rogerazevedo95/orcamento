@@ -1971,6 +1971,7 @@ document.addEventListener('click', async e => {
     case 'baixar-dados': baixarPlanilha(true); break;
     case 'importar': document.getElementById('arqImport').click(); break;
     case 'aplicar-importe': btn.disabled = true; await aplicarImporte(); break;
+    case 'alternar-dup': importePendente.pularDup = !importePendente.pularDup; render(); break;
     case 'cancelar-importe': importePendente = null; render(); break;
     case 'conta': dlgConta(); break;
     case 'sair': await Store.sair(); break;
@@ -2566,7 +2567,21 @@ function lerAba(wb, nome, cols){
   if (!aoa.length) return [];
   const cab = aoa[0].map(normaliza);
   const idx = {};
-  cols.forEach(c => { const alvo = normaliza(ROT[c]); idx[c] = cab.findIndex(x => x === alvo || x.indexOf(alvo.split(' ')[0]) === 0); });
+  const usados = new Set();
+  // 1) casamento exato do cabeçalho
+  cols.forEach(c => {
+    const alvo = normaliza(ROT[c]);
+    const i = cab.findIndex((x, k) => x === alvo && !usados.has(k));
+    if (i >= 0){ idx[c] = i; usados.add(i); }
+  });
+  // 2) só o que sobrou tenta prefixo, e nunca rouba coluna já usada
+  cols.forEach(c => {
+    if (idx[c] !== undefined) return;
+    const alvo = normaliza(ROT[c]);
+    const i = cab.findIndex((x, k) => !usados.has(k) && x && (x.indexOf(alvo) === 0 || alvo.indexOf(x) === 0));
+    idx[c] = i;
+    if (i >= 0) usados.add(i);
+  });
   const out = [];
   for (let i = 1; i < aoa.length; i++){
     const linha = aoa[i];
@@ -2589,7 +2604,9 @@ function validaReceita(o){
   const cl = normaliza(o.classe);
   const classe = cl.indexOf('pass') === 0 ? 'passiva' : 'ativa';
   const de = celulaParaData(o.dataExecutada);
-  const recebido = normaliza(o.status).indexOf('receb') === 0 || !!de;
+  const st = normaliza(o.status);
+  const pendente = st.indexOf('a ') === 0 || st.indexOf('pend') === 0;
+  const recebido = !pendente && (st.indexOf('receb') === 0 || !!de);
   return {erros, rec: {
     id: String(o.id||'').trim() || null,
     descricao: desc, tipo: tipo || tipos[0] || '', classe,
@@ -2624,7 +2641,9 @@ function validaDespesa(o){
   const classes = state.config.classesDespesa || [];
   const cls = classes.find(c => normaliza(c) === normaliza(o.classe)) || classes[0] || '';
   const de = celulaParaData(o.dataExecutada);
-  const pago = normaliza(o.status).indexOf('pag') === 0 || !!de;
+  const st = normaliza(o.status);
+  const pendente = st.indexOf('a ') === 0 || st.indexOf('pend') === 0;
+  const pago = !pendente && (st.indexOf('pag') === 0 || !!de);
   return {erros, rec: {
     id: String(o.id||'').trim() || null,
     descricao: desc, tipo, classeDespesa: cls,
@@ -2676,6 +2695,10 @@ async function aplicarCadastros(cad){
   return {tipos: novosTD.length + novosTR.length, cartoes: novosC.length};
 }
 
+function assinatura(r){
+  return normaliza(r.descricao) + '|' + (r.dataPrevista || '') + '|' + (Math.round((Number(r.valorPrevisto)||0)*100)/100);
+}
+
 let importePendente = null;
 async function lerArquivo(file){
   if (!xlsxPronto()){ toast('A biblioteca de planilhas não carregou.'); return; }
@@ -2688,12 +2711,17 @@ async function lerArquivo(file){
   const des = lerAba(wb, 'Despesas', COLS_DES).map(validaDespesa);
   const idsR = new Set(state.receitas.map(r => r.id));
   const idsD = new Set(state.despesas.map(r => r.id));
+  const sigR = new Set(state.receitas.map(assinatura));
+  const sigD = new Set(state.despesas.map(assinatura));
+  rec.forEach(x => { x.dup = !x.erros.length && !x.rec.id && sigR.has(assinatura(x.rec)); });
+  des.forEach(x => { x.dup = !x.erros.length && !x.rec.id && sigD.has(assinatura(x.rec)); });
   const resumo = {
-    receitas: rec, despesas: des,
-    novosR: rec.filter(x => !x.erros.length && !x.rec.id).length,
+    receitas: rec, despesas: des, pularDup: true,
+    novosR: rec.filter(x => !x.erros.length && !x.rec.id && !x.dup).length,
     attR: rec.filter(x => !x.erros.length && x.rec.id && idsR.has(x.rec.id)).length,
-    novosD: des.filter(x => !x.erros.length && !x.rec.id).length,
+    novosD: des.filter(x => !x.erros.length && !x.rec.id && !x.dup).length,
     attD: des.filter(x => !x.erros.length && x.rec.id && idsD.has(x.rec.id)).length,
+    dups: rec.filter(x => x.dup).length + des.filter(x => x.dup).length,
     erros: rec.filter(x => x.erros.length).length + des.filter(x => x.erros.length).length
   };
   importePendente = resumo;
@@ -2703,8 +2731,9 @@ async function lerArquivo(file){
 async function aplicarImporte(){
   if (!importePendente) return;
   const prep = x => { const r = Object.assign({}, x.rec); if (!r.id) delete r.id; return r; };
-  const recs = importePendente.receitas.filter(x => !x.erros.length).map(prep);
-  const desp = importePendente.despesas.filter(x => !x.erros.length).map(prep);
+  const vale = x => !x.erros.length && !(importePendente.pularDup && x.dup);
+  const recs = importePendente.receitas.filter(vale).map(prep);
+  const desp = importePendente.despesas.filter(vale).map(prep);
   const total = recs.length + desp.length;
   state.importando = {feito: 0, total};
   render();
@@ -2745,7 +2774,15 @@ function viewDados(){
         fig('Receitas novas', String(p.novosR)) + fig('Receitas atualizadas', String(p.attR)) +
         fig('Despesas novas', String(p.novosD)) + fig('Despesas atualizadas', String(p.attD)) +
         fig('Com erro', String(p.erros), p.erros ? 'serão ignoradas' : '', p.erros ? 'neg' : 'pos') +
+        fig('Já existem', String(p.dups || 0), p.dups ? (p.pularDup ? 'serão puladas' : 'serão duplicadas') : 'nenhuma repetida', p.dups && !p.pularDup ? 'neg' : 'pos') +
       '</div>';
+    if (p.dups){
+      h += '<div class="banner" style="background:' + (p.pularDup ? 'var(--viridian-soft)' : 'var(--clay-soft)') + '">' +
+        '<strong>' + p.dups + ' linha(s) já existem no sistema</strong> com a mesma descrição, data e valor. ' +
+        (p.pularDup ? 'Vão ser puladas, então importar de novo não duplica nada.' : 'Serão gravadas mesmo assim, criando registros repetidos.') +
+        ' <button class="btn sm" type="button" data-action="alternar-dup" style="margin-left:8px">' +
+        (p.pularDup ? 'Importar mesmo assim' : 'Voltar a pular') + '</button></div>';
+    }
     if (erros.length){
       h += '<div class="tablewrap" style="margin-bottom:14px"><table style="min-width:460px"><thead><tr><th>Linha</th><th>Descrição</th><th>Problema</th></tr></thead><tbody>' +
         erros.slice(0,25).map(x => '<tr><td>' + (x.rec.descricao ? '' : '') + (x._linha||'') + '</td><td>' + esc(x.rec.descricao || '—') + '</td><td class="neg">' + esc(x.erros.join('; ')) + '</td></tr>').join('') +
