@@ -146,6 +146,7 @@ main{padding:20px 16px 72px; max-width:1180px; width:100%; margin:0 auto}
 .band-track{position:relative; height:44px; border-radius:6px; overflow:hidden; background:var(--surface-2); border:1px solid var(--line); display:flex}
 .band-seg{height:100%; display:flex; align-items:center; justify-content:center; color:#fff; font-size:12.5px; font-weight:600; font-family:var(--font-display); min-width:0; overflow:hidden}
 .band-seg.n{background:var(--viridian)} .band-seg.d{background:var(--ochre)} .band-seg.m{background:var(--azure)}
+.band-seg.r{background:var(--clay)}
 .band-seg.rest{background:repeating-linear-gradient(135deg,var(--surface-2),var(--surface-2) 6px,var(--line) 6px,var(--line) 7px); color:var(--ink-3)}
 .band-marks{position:relative; height:20px; margin-top:4px}
 .band-mark{position:absolute; top:0; transform:translateX(-50%); font-size:11.5px; color:var(--ink-3); white-space:nowrap}
@@ -153,6 +154,7 @@ main{padding:20px 16px 72px; max-width:1180px; width:100%; margin:0 auto}
 .band-legend{display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin-top:16px}
 .leg{border-left:3px solid var(--line); padding-left:10px}
 .leg.n{border-color:var(--viridian)} .leg.d{border-color:var(--ochre)} .leg.m{border-color:var(--azure)}
+.leg.r{border-color:var(--clay)}
 .leg .t{font-size:13px; color:var(--ink-2)}
 .leg .v{font-family:var(--font-display); font-weight:600; font-size:17px}
 .leg .s{font-size:12.5px}
@@ -183,6 +185,7 @@ td.act{text-align:right; white-space:nowrap}
 .pill.n{background:var(--viridian-soft); color:var(--viridian)}
 .pill.d{background:var(--ochre-soft); color:var(--ochre)}
 .pill.m{background:var(--azure-soft); color:var(--azure)}
+.pill.r{background:var(--clay-soft); color:var(--clay)}
 .pill.q{background:var(--surface-2); color:var(--ink-2); border:1px solid var(--line)}
 
 /* ---------- buttons ---------- */
@@ -356,10 +359,12 @@ function lastMonths(n, endM){
    2. Estado e configuração padrão
    ========================================================= */
 const NATUREZAS = [
-  {id:'necessidade', nome:'Necessidade', cls:'n', meta:50},
-  {id:'desejo',      nome:'Desejo',      cls:'d', meta:30},
-  {id:'meta',        nome:'Meta financeira', cls:'m', meta:20}
+  {id:'necessidade', nome:'Necessidade', cls:'n', cfg:'metaNec'},
+  {id:'desejo',      nome:'Desejo',      cls:'d', cfg:'metaDes'},
+  {id:'meta',        nome:'Meta financeira', cls:'m', cfg:'metaMet'},
+  {id:'rolagem',     nome:'Rolagem de dívida', cls:'r', cfg:'metaRol'}
 ];
+const metaDaNatureza = n => (Number(state.config[n.cfg]) || 0) / 100;
 const natById = id => NATUREZAS.find(n => n.id === id) || NATUREZAS[0];
 
 const DEFAULT_CONFIG = {
@@ -386,7 +391,7 @@ const DEFAULT_CONFIG = {
   ],
   classesDespesa: ['Fixa','Variável','Eventual'],
   metodos: ['Conta corrente','Pix','Dinheiro','Cartão de débito','Boleto','Cartão de crédito'],
-  metaNec: 50, metaDes: 30, metaMet: 20,
+  metaNec: 50, metaDes: 30, metaMet: 20, metaRol: 0,
   taxaRetirada: 4,
   rentabilidadeReal: 6,
   mesesReserva: 6,
@@ -837,7 +842,7 @@ function bandaOrcamento(res){
   const sobra = Math.max(0, 1 - usado);
   const escala = Math.max(1, usado);
   const w = p => (p/escala*100).toFixed(2) + '%';
-  const metas = [state.config.metaNec, state.config.metaDes, state.config.metaMet].map(Number);
+  const metas = NATUREZAS.map(n => Number(state.config[n.cfg]) || 0);
   const acum = [metas[0], metas[0]+metas[1], metas[0]+metas[1]+metas[2]];
 
   let band = '<div class="band-track">';
@@ -1230,6 +1235,7 @@ function viewCadastros(){
     '<div class="f"><label for="cfgNec">Necessidades (%)</label><input id="cfgNec" type="number" min="0" max="100" value="' + cfg.metaNec + '" data-cfg="metaNec"></div>' +
     '<div class="f"><label for="cfgDes">Desejos (%)</label><input id="cfgDes" type="number" min="0" max="100" value="' + cfg.metaDes + '" data-cfg="metaDes"></div>' +
     '<div class="f"><label for="cfgMet">Metas financeiras (%)</label><input id="cfgMet" type="number" min="0" max="100" value="' + cfg.metaMet + '" data-cfg="metaMet"></div>' +
+    '<div class="f"><label for="cfgRol">Rolagem de dívida (%)</label><input id="cfgRol" type="number" min="0" max="100" value="' + cfg.metaRol + '" data-cfg="metaRol"></div>' +
     '<div class="f"><label for="cfgRes">Reserva de emergência (meses)</label><input id="cfgRes" type="number" min="1" max="36" value="' + cfg.mesesReserva + '" data-cfg="mesesReserva"></div>' +
     '</div><div style="margin-top:12px"><button class="btn sm primary" type="button" data-action="save-cfg-metas">Salvar metas</button></div></div></section>';
 
@@ -2038,6 +2044,33 @@ document.addEventListener('keydown', e => {
    ========================================================= */
 function dataEfetiva(r){ return r.dataExecutada || r.dataPrevista || ''; }
 
+function faturasPorVencimento(inicio, fim){
+  const out = [];
+  state.cartoes.forEach(c => {
+    const V = Number(c.diaVencimento) || 10;
+    const F = Number(c.diaFechamento) || 1;
+    const lanc = state.despesas.filter(d => d.metodo === METODO_CARTAO && d.cartaoId === c.id);
+    const porMes = {};
+    lanc.forEach(d => {
+      const m = mesFatura(dataEfetiva(d), F);
+      if (!m) return;
+      porMes[m] = (porMes[m] || 0) + (realizadoD(d) || previsto(d));
+    });
+    Object.keys(porMes).forEach(m => {
+      if (porMes[m] <= 0) return;
+      const mesPag = V > F ? m : addMonths(m, 1);
+      const [y, mm] = mesPag.split('-').map(Number);
+      const ultimo = new Date(y, mm, 0).getDate();
+      const data = mesPag + '-' + String(Math.min(V, ultimo)).padStart(2, '0');
+      if (data >= inicio && data <= fim){
+        out.push({data, desc: 'Fatura ' + (c.nome || 'cartão') + ' · ' + shortMonth(m),
+                  entrada: 0, saida: porMes[m], tipo:'f'});
+      }
+    });
+  });
+  return out;
+}
+
 function fluxoDiario(){
   const cfg = state.config;
   const inicio = cfg.dataSaldo || todayISO();
@@ -2048,9 +2081,11 @@ function fluxoDiario(){
     if (d >= inicio && d <= horizonte) itens.push({data:d, desc:r.descricao, entrada: realizadoR(r) || previsto(r), saida:0, tipo:'r', st:r.status});
   });
   state.despesas.forEach(x => {
+    if (x.metodo === METODO_CARTAO) return;   // sai no vencimento da fatura, não na data da compra
     const d = dataEfetiva(x);
     if (d >= inicio && d <= horizonte) itens.push({data:d, desc:x.descricao, entrada:0, saida: realizadoD(x) || previsto(x), tipo:'d', st:x.status});
   });
+  faturasPorVencimento(inicio, horizonte).forEach(f => itens.push(f));
   itens.sort((a,b) => a.data.localeCompare(b.data));
 
   let saldo = Number(cfg.saldoInicial) || 0;
@@ -2108,6 +2143,7 @@ function viewFluxo(){
         '<td>' + fmtDate(x.data) + '</td><td>' + (x.saldo < 0 ? '<span class="pill late">no vermelho</span>' : '<span class="pill ok">coberto</span>') + '</td></tr>';
     }).join('') + '</tbody></table></div></section>';
 
+  h += '<p class="small muted" style="margin:0 0 14px">Compras no cartão não saem do caixa no dia da compra: elas entram como <strong>uma fatura só</strong>, no dia do vencimento de cada cartão. Confira o dia do vencimento e do fechamento na aba Cartões — é o que define em qual fatura cada compra cai.</p>';
   h += '<section class="sec">' + secHead('Dia a dia') +
     '<div class="tablewrap"><table><thead><tr><th>Data</th><th>Lançamentos</th><th class="num">Entradas</th><th class="num">Saídas</th><th class="num">Saldo</th></tr></thead><tbody>';
   f.dias.forEach(d => {
@@ -2866,7 +2902,7 @@ function viewAcompanha(){
   NATUREZAS.forEach(n => {
     const b = a.porNat[n.id];
     const p = baseRec > 0 ? b.real/baseRec : 0;
-    const alvo = [state.config.metaNec, state.config.metaDes, state.config.metaMet][NATUREZAS.indexOf(n)] / 100;
+    const alvo = metaDaNatureza(n);
     const bom = n.id === 'meta' ? p >= alvo : p <= alvo;
     h += '<tr><td><span class="pill ' + n.cls + '">' + n.nome + '</span></td>' +
       '<td class="num">' + (b.teto ? money(b.teto) : '—') + '</td>' +
