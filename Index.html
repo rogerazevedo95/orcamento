@@ -399,6 +399,7 @@ const METODO_CARTAO = 'Cartão de crédito';
 const state = {
   receitas: [], despesas: [], cartoes: [], carteira: [], planos: [],
   config: JSON.parse(JSON.stringify(DEFAULT_CONFIG)),
+  importando: null,
   ready: {receitas:false, despesas:false, cartoes:false, carteira:false, planos:false, config:false},
   ui: {
     tab: 'painel',
@@ -531,6 +532,24 @@ const Store = {
     });
     if (error){ toast('Não salvou: ' + error.message); await this.carregar(); render(); }
     return id;
+  },
+
+  async saveMany(col, recs, progresso){
+    const linhas = recs.map(r => {
+      const id = r.id || uid();
+      const body = Object.assign({}, r); delete body.id;
+      const arr = state[col]; const i = arr.findIndex(x => x.id === id);
+      const full = Object.assign({id}, body);
+      if (i >= 0) arr[i] = full; else arr.push(full);
+      return {id, household_id: this.casa.id, colecao: col, dados: body, atualizado_em: new Date().toISOString()};
+    });
+    const LOTE = 400;
+    for (let i = 0; i < linhas.length; i += LOTE){
+      const { error } = await this.sb.from('registros').upsert(linhas.slice(i, i + LOTE));
+      if (error){ toast('Falha ao gravar: ' + error.message); return false; }
+      if (progresso) progresso(Math.min(i + LOTE, linhas.length), linhas.length);
+    }
+    return true;
   },
 
   async remove(col, id){
@@ -2446,13 +2465,32 @@ function planilha(comDados){
   };
   XLSX.utils.book_append_sheet(wb, mk(COLS_REC, comDados ? state.receitas.map(linhaDeReceita) : []), 'Receitas');
   XLSX.utils.book_append_sheet(wb, mk(COLS_DES, comDados ? state.despesas.map(linhaDeDespesa) : []), 'Despesas');
+
+  const cart = [['Nome','Limite total','Dia do vencimento','Dia do fechamento','Já utilizado']]
+    .concat((comDados ? state.cartoes : []).map(c => [c.nome, Number(c.limiteTotal)||0, c.diaVencimento||'', c.diaFechamento||'', Number(c.saldoInicial)||0]));
+  const wsc = XLSX.utils.aoa_to_sheet(cart);
+  wsc['!cols'] = [{wch:26},{wch:14},{wch:18},{wch:18},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, wsc, 'Cartões');
+
+  const td = [['Tipo de despesa','Natureza']]
+    .concat((state.config.tiposDespesa||[]).map(t => [t.nome, natById(t.natureza).nome]));
+  const wstd = XLSX.utils.aoa_to_sheet(td);
+  wstd['!cols'] = [{wch:32},{wch:20}];
+  XLSX.utils.book_append_sheet(wb, wstd, 'Tipos de despesa');
+
+  const tr = [['Tipo de receita']].concat((state.config.tiposReceita||[]).map(t => [t]));
+  const wstr = XLSX.utils.aoa_to_sheet(tr);
+  wstr['!cols'] = [{wch:32}];
+  XLSX.utils.book_append_sheet(wb, wstr, 'Tipos de receita');
   const ref = [
     ['Como usar esta planilha'],
     ['1. Preencha as abas Receitas e Despesas. Uma linha por lançamento.'],
     ['2. Deixe a coluna ID vazia para criar um lançamento novo.'],
     ['3. Se o ID estiver preenchido, o lançamento existente é atualizado. Não invente IDs.'],
     ['4. Datas no formato dd/mm/aaaa. Valores com vírgula decimal.'],
-    ['5. Salve e use o botão Importar no sistema.'],
+    ['5. As abas Cartões, Tipos de despesa e Tipos de receita são cadastradas junto.'],
+    ['   Cartão ou tipo que ainda não existir é criado na importação.'],
+    ['6. Salve e use o botão Importar no sistema.'],
     [''],
     ['Valores aceitos em cada coluna'],
     [''],
@@ -2559,9 +2597,47 @@ function validaDespesa(o){
     status: pago ? 'pago' : 'a_pagar',
     dataExecutada: pago ? (de || dp) : '',
     valorPago: parseMoney(o.valorPago) || '',
-    metodo: met, cartaoId, faturaPaga: false,
+    metodo: met, cartaoId, faturaPaga: pago,
     obs: String(o.obs||'').trim()
   }};
+}
+
+function lerAoa(wb, nome){
+  const ws = wb.Sheets[nome];
+  if (!ws) return [];
+  return XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''})
+    .slice(1).filter(l => l && String(l[0]||'').trim() !== '');
+}
+function cadastrosDoArquivo(wb){
+  const cartoes = lerAoa(wb, 'Cartões').concat(lerAoa(wb, 'Cartoes')).map(l => ({
+    nome: String(l[0]).trim(),
+    limiteTotal: parseMoney(l[1]),
+    diaVencimento: Number(l[2]) || 10,
+    diaFechamento: Number(l[3]) || 1,
+    saldoInicial: parseMoney(l[4])
+  }));
+  const tiposD = lerAoa(wb, 'Tipos de despesa').map(l => {
+    const n = NATUREZAS.find(x => normaliza(x.nome) === normaliza(l[1]));
+    return {nome: String(l[0]).trim(), natureza: n ? n.id : 'desejo'};
+  });
+  const tiposR = lerAoa(wb, 'Tipos de receita').map(l => String(l[0]).trim());
+  return {cartoes, tiposD, tiposR};
+}
+async function aplicarCadastros(cad){
+  const novosTD = (cad.tiposD || []).filter(t => t.nome &&
+    !(state.config.tiposDespesa||[]).some(x => normaliza(x.nome) === normaliza(t.nome)));
+  const novosTR = (cad.tiposR || []).filter(t => t &&
+    !(state.config.tiposReceita||[]).some(x => normaliza(x) === normaliza(t)));
+  if (novosTD.length || novosTR.length){
+    await Store.saveConfig({
+      tiposDespesa: (state.config.tiposDespesa||[]).concat(novosTD),
+      tiposReceita: (state.config.tiposReceita||[]).concat(novosTR)
+    });
+  }
+  const novosC = (cad.cartoes || []).filter(c => c.nome &&
+    !state.cartoes.some(x => normaliza(x.nome) === normaliza(c.nome)));
+  if (novosC.length) await Store.saveMany('cartoes', novosC);
+  return {tipos: novosTD.length + novosTR.length, cartoes: novosC.length};
 }
 
 let importePendente = null;
@@ -2569,6 +2645,9 @@ async function lerArquivo(file){
   if (!xlsxPronto()){ toast('A biblioteca de planilhas não carregou.'); return; }
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, {cellDates:true});
+  const cad = cadastrosDoArquivo(wb);
+  const feito = await aplicarCadastros(cad);
+  if (feito.tipos || feito.cartoes) toast(feito.cartoes + ' cartões e ' + feito.tipos + ' tipos cadastrados');
   const rec = lerAba(wb, 'Receitas', COLS_REC).map(validaReceita);
   const des = lerAba(wb, 'Despesas', COLS_DES).map(validaDespesa);
   const idsR = new Set(state.receitas.map(r => r.id));
@@ -2587,20 +2666,20 @@ async function lerArquivo(file){
 }
 async function aplicarImporte(){
   if (!importePendente) return;
-  let n = 0;
-  for (const x of importePendente.receitas){
-    if (x.erros.length) continue;
-    const r = Object.assign({}, x.rec); if (!r.id) delete r.id;
-    await Store.save('receitas', r); n++;
-  }
-  for (const x of importePendente.despesas){
-    if (x.erros.length) continue;
-    const d = Object.assign({}, x.rec); if (!d.id) delete d.id;
-    await Store.save('despesas', d); n++;
-  }
+  const prep = x => { const r = Object.assign({}, x.rec); if (!r.id) delete r.id; return r; };
+  const recs = importePendente.receitas.filter(x => !x.erros.length).map(prep);
+  const desp = importePendente.despesas.filter(x => !x.erros.length).map(prep);
+  const total = recs.length + desp.length;
+  state.importando = {feito: 0, total};
+  render();
+  const passo = (f, t, base) => { state.importando = {feito: base + f, total}; render(); };
+  let ok = true;
+  if (recs.length) ok = await Store.saveMany('receitas', recs, (f, t) => passo(f, t, 0));
+  if (ok && desp.length) ok = await Store.saveMany('despesas', desp, (f, t) => passo(f, t, recs.length));
+  state.importando = null;
   importePendente = null;
-  toast(n + ' lançamentos importados');
-  state.ui.tab = 'despesas'; render();
+  if (ok) toast(total + ' lançamentos importados');
+  state.ui.tab = 'painel'; render();
 }
 
 function viewDados(){
@@ -2612,6 +2691,14 @@ function viewDados(){
     '<button class="btn primary" type="button" data-action="importar">Importar planilha preenchida</button>' +
     '<input type="file" id="arqImport" accept=".xlsx,.xls" style="display:none">' +
     '</div></div></section>';
+
+  if (state.importando){
+    const im = state.importando;
+    const p100 = im.total ? Math.round(im.feito/im.total*100) : 0;
+    h += '<div class="card" style="margin-bottom:18px"><strong>Importando…</strong> ' + im.feito + ' de ' + im.total +
+      '<div class="rail" style="margin-top:10px"><div class="fill" style="width:' + p100 + '%"></div></div>' +
+      '<p class="small muted" style="margin:10px 0 0">Não feche a página. Registros são gravados em lotes de 400.</p></div>';
+  }
 
   if (importePendente){
     const p = importePendente;
