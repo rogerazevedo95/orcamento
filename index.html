@@ -549,7 +549,11 @@ const Store = {
     const { error } = await this.sb.from('registros').upsert({
       id, household_id: this.casa.id, colecao: col, dados: body, atualizado_em: new Date().toISOString()
     });
-    if (error){ toast('Não salvou: ' + error.message); await this.carregar(); render(); }
+    if (error){
+      this.ultimoErro = error.message || String(error);
+      await this.carregar(); render();
+      return null;
+    }
     return id;
   },
 
@@ -2303,6 +2307,13 @@ function viewPlanos(){
     '<span class="grow"></span>' +
     '<span class="small muted">Um plano descreve a regra; os lançamentos são gerados a partir dela.</span></div>';
 
+  const orfaos = state.despesas.concat(state.receitas).filter(r => r.planoId &&
+    !state.planos.some(p => p.id === r.planoId)).length;
+  if (orfaos){
+    h += '<div class="banner" style="background:var(--clay-soft)"><strong>' + orfaos +
+      ' lançamento(s) apontam para planos que não existem mais.</strong> Isso acontece quando o plano não chegou a ser gravado. ' +
+      'Confira se o supabase-migracao-planos.sql já foi executado no SQL Editor do Supabase.</div>';
+  }
   if (!state.planos.length){
     return h + empty('Nenhum plano cadastrado',
       'Aqui entram as coisas que se repetem por regra: aluguel todo mês, manutenção do ar-condicionado duas vezes por ano, IPVA em janeiro, mensalidade dos filhos a partir de um mês, a entrada de um carro novo. Você define a regra uma vez e o sistema escreve os lançamentos.',
@@ -2369,7 +2380,19 @@ function formPlano(rec){
     onSave: async o => {
       const salvo = Object.assign({id: p.id}, p, o);
       const id = await Store.save('planos', salvo);
-      salvo.id = id || p.id;
+      if (!id){
+        const msg = Store.ultimoErro || '';
+        Store.ultimoErro = '';
+        await ask({
+          title: 'O plano não foi gravado',
+          message: /colecao|check|constraint/i.test(msg)
+            ? 'O banco ainda não aceita a coleção "planos". Rode o arquivo supabase-migracao-planos.sql no SQL Editor do Supabase e tente de novo. Nenhum lançamento foi criado.'
+            : 'Não consegui gravar o plano: ' + msg + '. Nenhum lançamento foi criado.',
+          actions: [{label:'Entendi', value:'ok', primary:true}]
+        });
+        return;
+      }
+      salvo.id = id;
       const n = await gerarPlano(salvo);
       toast(n + (n === 1 ? ' lançamento gerado' : ' lançamentos gerados'));
     },
